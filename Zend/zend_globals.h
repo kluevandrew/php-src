@@ -100,6 +100,7 @@ struct _zend_compiler_globals {
 
 	zend_string *doc_comment;
 	uint32_t extra_fn_flags;
+	HashTable *attributes;
 
 	uint32_t compiler_options; /* set of ZEND_COMPILE_* constants */
 

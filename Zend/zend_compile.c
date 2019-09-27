@@ -1738,6 +1738,7 @@ ZEND_API void zend_initialize_class_data(zend_class_entry *ce, zend_bool nullify
 	} else {
 		ce->static_members_table = ce->default_static_members_table;
 		ce->info.user.doc_comment = NULL;
+		ce->info.user.attributes = NULL;
 	}
 
 	ce->default_properties_count = 0;
@@ -1828,6 +1829,100 @@ zend_ast *zend_negate_num_string(zend_ast *ast) /* {{{ */
 		ZEND_ASSERT(0);
 	}
 	return ast;
+}
+/* }}} */
+
+void zend_add_attribute(zend_ast *name, zend_ast *value) /* {{{ */
+{
+	zval *val, tmp;
+	zend_string *key = zend_ast_get_str(name);
+//
+#if 1 /* SPECIAL_ATTRIBUTE */
+	if (ZSTR_LEN(key) >= 2 && ZSTR_VAL(key)[0] == '_' && ZSTR_VAL(key)[1] == '_') {
+		zend_error_noreturn(E_COMPILE_ERROR, "Unknown special attribute %s", ZSTR_VAL(key));
+	}
+#endif
+	if (!CG(attributes)) {
+		ALLOC_HASHTABLE(CG(attributes));
+		zend_hash_init(CG(attributes), 8, NULL, ZVAL_PTR_DTOR, 0);
+	}
+#if 0 /* ATTRIBUTE_VALUES_ARRAYS */
+	if (value) {
+		if (value->kind == ZEND_AST_ZVAL) {
+			val = zend_ast_get_zval(value);
+		} else {
+			ZVAL_AST(&tmp, zend_ast_copy(value));
+			zend_ast_destroy(value);
+			val = &tmp;
+		}
+	} else {
+		ZVAL_TRUE(&tmp);
+		val = &tmp;
+	}
+
+	if (!zend_hash_add(CG(attributes), key, val)) {
+		zend_error_noreturn(E_COMPILE_ERROR, "Redeclared attribute %s", ZSTR_VAL(key));
+	}
+#else
+	ZVAL_NULL(&tmp);
+	val = zend_hash_add(CG(attributes), key, &tmp);
+	if (!val) {
+		zend_error_noreturn(E_COMPILE_ERROR, "Redeclared attribute %s", ZSTR_VAL(key));
+	}
+	if (value) {
+		if (value->kind == ZEND_AST_ZVAL) {
+			zval *zv = zend_ast_get_zval(value);
+
+			if (Z_TYPE_P(zv) == IS_ARRAY) {
+				ZVAL_COPY_VALUE(val, zv);
+			} else {
+				array_init(val);
+				zend_hash_next_index_insert_new(Z_ARRVAL_P(val), zv);
+			}
+		} else {
+			ZVAL_AST(&tmp, zend_ast_copy(value));
+			zend_ast_destroy(value);
+			array_init(val);
+			zend_hash_next_index_insert_new(Z_ARRVAL_P(val), &tmp);
+		}
+	} else {
+		array_init(val);
+	}
+#endif
+	zend_string_release(key);
+}
+/* }}} */
+
+zend_ast *zend_add_attribute_value(zend_ast *list_ast, zend_ast *val_ast) /* {{{ */
+{
+	zval *list, *val, arr, tmp;
+
+	if (list_ast->kind == ZEND_AST_ZVAL) {
+		list = zend_ast_get_zval(list_ast);
+		if (Z_TYPE_P(list) != IS_ARRAY) {
+			array_init(&arr);
+			zend_hash_next_index_insert_new(Z_ARRVAL(arr), list);
+			ZVAL_ARR(list, Z_ARR(arr));
+		}
+	} else {
+		array_init(&arr);
+        ZVAL_AST(&tmp, zend_ast_copy(list_ast));
+		zend_ast_destroy(list_ast);
+		zend_hash_next_index_insert_new(Z_ARRVAL(arr), &tmp);
+		list_ast = zend_ast_create_zval(&arr);
+		list = zend_ast_get_zval(list_ast);
+	}
+
+	if (val_ast->kind == ZEND_AST_ZVAL) {
+		val = zend_ast_get_zval(val_ast);
+	} else {
+        ZVAL_AST(&tmp, zend_ast_copy(val_ast));
+		zend_ast_destroy(val_ast);
+		val = &tmp;
+	}
+	zend_hash_next_index_insert_new(Z_ARRVAL_P(list), val);
+
+	return list_ast;
 }
 /* }}} */
 
@@ -6053,7 +6148,12 @@ void zend_compile_func_decl(znode *result, zend_ast *ast) /* {{{ */
 	op_array->line_start = decl->start_lineno;
 	op_array->line_end = decl->end_lineno;
 	if (decl->doc_comment) {
-		op_array->doc_comment = zend_string_copy(decl->doc_comment);
+		op_array->doc_comment = decl->doc_comment;
+		decl->doc_comment = NULL;
+	}
+	if (decl->attributes) {
+		op_array->attributes = decl->attributes;
+		decl->attributes = NULL;
 	}
 	if (decl->kind == ZEND_AST_CLOSURE) {
 		op_array->fn_flags |= ZEND_ACC_CLOSURE;
@@ -6137,13 +6237,20 @@ void zend_compile_prop_decl(zend_ast *ast) /* {{{ */
 		zend_ast *name_ast = prop_ast->child[0];
 		zend_ast *value_ast = prop_ast->child[1];
 		zend_ast *doc_comment_ast = prop_ast->child[2];
+		zend_ast *attributes_ast = prop_ast->child[3];
 		zend_string *name = zval_make_interned_string(zend_ast_get_zval(name_ast));
 		zend_string *doc_comment = NULL;
+		HashTable *attributes = NULL;
 		zval value_zv;
 
 		/* Doc comment has been appended as last element in ZEND_AST_PROP_ELEM ast */
 		if (doc_comment_ast) {
-			doc_comment = zend_string_copy(zend_ast_get_str(doc_comment_ast));
+			doc_comment = zend_ast_get_str(doc_comment_ast);
+			prop_ast->child[2] = NULL;
+		}
+		if (attributes_ast) {
+			attributes = zend_ast_get_hash(attributes_ast);
+			prop_ast->child[3] = NULL;
 		}
 
 		if (flags & ZEND_ACC_FINAL) {
@@ -6163,7 +6270,7 @@ void zend_compile_prop_decl(zend_ast *ast) /* {{{ */
 			ZVAL_NULL(&value_zv);
 		}
 
-		zend_declare_property_ex(ce, name, &value_zv, flags, doc_comment);
+		zend_declare_property_ex(ce, name, &value_zv, flags, doc_comment, attributes);
 	}
 }
 /* }}} */
@@ -6184,10 +6291,20 @@ void zend_compile_class_const_decl(zend_ast *ast) /* {{{ */
 		zend_ast *name_ast = const_ast->child[0];
 		zend_ast *value_ast = const_ast->child[1];
 		zend_ast *doc_comment_ast = const_ast->child[2];
+		zend_ast *attributes_ast = const_ast->child[3];
 		zend_string *name = zval_make_interned_string(zend_ast_get_zval(name_ast));
-		zend_string *doc_comment = doc_comment_ast ? zend_string_copy(zend_ast_get_str(doc_comment_ast)) : NULL;
+		zend_string *doc_comment = NULL;
+		HashTable *attributes = NULL;
 		zval value_zv;
 
+		if (doc_comment_ast) {
+			doc_comment = zend_ast_get_str(doc_comment_ast);
+			const_ast->child[2] = NULL;
+		}
+		if (attributes_ast) {
+			attributes = zend_ast_get_hash(attributes_ast);
+			const_ast->child[3] = NULL;
+		}
 		if (UNEXPECTED(ast->attr & (ZEND_ACC_STATIC|ZEND_ACC_ABSTRACT|ZEND_ACC_FINAL))) {
 			if (ast->attr & ZEND_ACC_STATIC) {
 				zend_error_noreturn(E_COMPILE_ERROR, "Cannot use 'static' as constant modifier");
@@ -6199,7 +6316,7 @@ void zend_compile_class_const_decl(zend_ast *ast) /* {{{ */
 		}
 
 		zend_const_expr_to_zval(&value_zv, value_ast);
-		zend_declare_class_constant_ex(ce, name, &value_zv, ast->attr, doc_comment);
+		zend_declare_class_constant_ex(ce, name, &value_zv, ast->attr, doc_comment, attributes);
 	}
 }
 /* }}} */
@@ -6333,10 +6450,10 @@ void zend_compile_friend(zend_ast *ast) /* {{{ */
 
 	for (i = 0; i < friends->children; ++i) {
 		zend_ast *friend_ast = friends->child[i];
-		
+
 	 	opline = zend_emit_op(NULL, ZEND_ADD_FRIEND, &FC(implementing_class), NULL);
 		opline->op2_type = IS_CONST;
-		opline->op2.constant = zend_add_class_name_literal(CG(active_op_array), 
+		opline->op2.constant = zend_add_class_name_literal(CG(active_op_array),
 			zend_resolve_class_name_ast(friend_ast));
 
 	 	ce->num_friends++;
@@ -6436,7 +6553,12 @@ void zend_compile_class_decl(zend_ast *ast) /* {{{ */
 	ce->info.user.line_end = decl->end_lineno;
 
 	if (decl->doc_comment) {
-		ce->info.user.doc_comment = zend_string_copy(decl->doc_comment);
+		ce->info.user.doc_comment = decl->doc_comment;
+		decl->doc_comment = NULL;
+	}
+	if (decl->attributes) {
+		ce->info.user.attributes = decl->attributes;
+		decl->attributes = NULL;
 	}
 
 	if (UNEXPECTED((decl->flags & ZEND_ACC_ANON_CLASS))) {
@@ -8340,7 +8462,7 @@ void zend_compile_stmt(zend_ast *ast) /* {{{ */
 			break;
 		case ZEND_AST_FRIEND:
 			zend_compile_friend(ast);
-			break;	
+			break;
 		case ZEND_AST_CLASS:
 			zend_compile_class_decl(ast);
 			break;
