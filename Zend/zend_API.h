@@ -208,6 +208,7 @@ typedef struct _zend_fcall_info_cache {
 		class_container.__set = NULL;							\
 		class_container.__unset = NULL;							\
 		class_container.__isset = NULL;							\
+		class_container.__hash = NULL;						\
 		class_container.__debugInfo = NULL;						\
 		class_container.__compareTo = NULL;						\
 		class_container.__equals = NULL;						\

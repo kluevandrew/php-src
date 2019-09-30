@@ -1889,6 +1889,15 @@ static zend_always_inline zval *zend_fetch_dimension_address_inner(HashTable *ht
 	zval *retval = NULL;
 	zend_string *offset_key;
 	zend_ulong hval;
+	int free_key = 0;
+	zval obj_key;
+
+	if (UNEXPECTED(Z_TYPE_P(dim) == IS_OBJECT && Z_OBJCE_P(dim)->__hash)) {
+		if (zend_object_offset(dim, &obj_key TSRMLS_CC) == SUCCESS) {
+			free_key = 1;
+			dim = &obj_key;
+		}
+	}
 
 try_again:
 	if (EXPECTED(Z_TYPE_P(dim) == IS_LONG)) {
@@ -1991,6 +2000,9 @@ str_index:
 				retval = (type == BP_VAR_W || type == BP_VAR_RW) ?
 					NULL : &EG(uninitialized_zval);
 		}
+	}
+	if(free_key) {
+		zval_dtor(&obj_key);
 	}
 	return retval;
 }

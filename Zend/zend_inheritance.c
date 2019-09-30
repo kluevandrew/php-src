@@ -139,6 +139,9 @@ static void do_inherit_parent_constructor(zend_class_entry *ce) /* {{{ */
 	if (EXPECTED(!ce->__tostring)) {
 		ce->__tostring = ce->parent->__tostring;
 	}
+	if (!ce->__hash) {
+		ce->__hash = ce->parent->__hash;
+	}
 	if (EXPECTED(!ce->clone)) {
 		ce->clone = ce->parent->clone;
 	}
@@ -1326,6 +1329,8 @@ static void zend_add_magic_methods(zend_class_entry* ce, zend_string* mname, zen
 		ce->__callstatic = fe;
 	} else if (zend_string_equals_literal(mname, ZEND_TOSTRING_FUNC_NAME)) {
 		ce->__tostring = fe;
+	} else if (!strncmp(mname->val, ZEND_HASH_FUNC_NAME, mname->len)) {
+		ce->__hash = fe;
 	} else if (zend_string_equals_literal(mname, ZEND_DEBUGINFO_FUNC_NAME)) {
 		ce->__debugInfo = fe;
 	} else if (zend_string_equals_literal(mname, ZEND_COMPARETO_FUNC_NAME)) {
