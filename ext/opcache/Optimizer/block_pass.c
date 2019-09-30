@@ -787,6 +787,7 @@ static void zend_optimize_block(zend_basic_block *block, zend_op_array *op_array
 			case ZEND_MOD:
 			case ZEND_SL:
 			case ZEND_SR:
+			case ZEND_IN:
 			case ZEND_IS_SMALLER:
 			case ZEND_IS_SMALLER_OR_EQUAL:
 			case ZEND_IS_IDENTICAL:

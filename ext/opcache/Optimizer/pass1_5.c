@@ -52,6 +52,7 @@ void zend_optimizer_pass1(zend_op_array *op_array, zend_optimizer_ctx *ctx)
 		case ZEND_POW:
 		case ZEND_SL:
 		case ZEND_SR:
+		case ZEND_IN:
 		case ZEND_CONCAT:
 		case ZEND_FAST_CONCAT:
 		case ZEND_IS_EQUAL:

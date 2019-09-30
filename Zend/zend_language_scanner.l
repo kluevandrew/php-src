@@ -1590,6 +1590,10 @@ NEWLINE ("\r"|"\n"|"\r\n")
 	RETURN_TOKEN(T_LIST);
 }
 
+<ST_IN_SCRIPTING>"in" {
+	return T_IN;
+}
+
 <ST_IN_SCRIPTING>"array" {
 	RETURN_TOKEN(T_ARRAY);
 }

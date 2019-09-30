@@ -274,7 +274,8 @@ END_EXTERN_C()
 #define ZEND_ISSET_ISEMPTY_CV                197
 #define ZEND_FETCH_LIST_W                    198
 #define ZEND_ADD_FRIEND                      199
+#define ZEND_IN                              200
 
-#define ZEND_VM_LAST_OPCODE                  199
+#define ZEND_VM_LAST_OPCODE                  200
 
 #endif

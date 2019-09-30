@@ -2397,6 +2397,124 @@ ZEND_API zend_bool ZEND_FASTCALL instanceof_function(const zend_class_entry *ins
 }
 /* }}} */
 
+static zend_always_inline zend_bool in_function_inline(zval *needle, zval *haystack, int *status)
+{
+	zend_string *haystr = Z_STR_P(haystack), *needlestr;
+
+	*status = SUCCESS;
+
+	switch (Z_TYPE_P(haystack)) {
+		zval haycpy, *arrayptr;
+		zend_bool retval;
+
+		case IS_LONG:
+			haycpy = *haystack;
+			convert_to_string(&haycpy);
+			haystr = Z_STR(haycpy);
+		case IS_STRING:
+			needlestr = Z_STR_P(needle);
+
+			switch (Z_TYPE_P(needle)) {
+				zval needlecpy;
+					case IS_OBJECT:
+						ZVAL_UNDEF(&needlecpy);
+						convert_object_to_type(needle, &needlecpy, IS_STRING, convert_to_string);
+				if (Z_TYPE(needlecpy) != IS_STRING) {
+					zval_dtor(&needlecpy);
+				} else {
+				
+				if (0) {
+					case IS_LONG:
+						needlecpy = *needle;
+						convert_to_string(&needlecpy);
+				}
+						needlestr = Z_STR(needlecpy);
+					case IS_STRING:
+						if (needlestr->len) {
+							retval = zend_memnstr(haystr->val, needlestr->val, needlestr->len, haystr->val + haystr->len) ? 1 : 0;
+						} else {
+							retval = 0;
+							*status = FAILURE;
+							zend_error(E_WARNING, "Invalid empty string needle to stringish haystack for in operator");
+						}
+						if (Z_TYPE_P(needle) != IS_STRING) {
+							zend_string_release(needlestr);
+						}
+						break;
+				}
+
+					default:
+						retval = 0;
+						*status = FAILURE;
+						zend_error(E_WARNING, "Invalid needle type %s to haystack type %s for in operator", zend_zval_type_name(needle), zend_zval_type_name(haystack));
+
+			}
+
+			if (Z_TYPE_P(haystack) != IS_STRING && *status == SUCCESS) {
+				zend_string_release(haystr);
+			}
+
+			return retval;
+
+		case IS_ARRAY:
+			ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(haystack), arrayptr) {
+				ZVAL_DEREF(arrayptr);
+				int result = fast_is_identical_function(arrayptr, needle);
+				if (result != 0) {
+					return 1;
+				}
+			} ZEND_HASH_FOREACH_END();
+			break;
+
+		case IS_OBJECT:
+			if (instanceof_function(Z_OBJCE_P(haystack), zend_ce_traversable)) {
+				zend_object_iterator *iter = Z_OBJCE_P(haystack)->get_iterator(Z_OBJCE_P(haystack), haystack, 0);
+
+				if (iter->funcs->rewind && !EG(exception)) {
+					iter->funcs->rewind(iter);
+				}
+
+				while (!EG(exception) && iter->funcs->valid(iter) == SUCCESS && !EG(exception)) {
+					zval *val = iter->funcs->get_current_data(iter);
+
+					ZVAL_DEREF(val);
+                    int result = fast_is_identical_function(val, needle);
+
+					if (result != 0) {
+						zend_iterator_dtor(iter);
+						return 1;
+					}
+
+					iter->funcs->move_forward(iter);
+				}
+
+				if (iter) {
+					zend_iterator_dtor(iter);
+				}
+				return 0;
+			}
+
+		default:
+			*status = FAILURE;
+			zend_error(E_WARNING, "%s is not a valid haystack type for in operator", zend_zval_type_name(haystack));
+	}
+
+	return 0;
+}
+
+ZEND_API zend_bool in_function_ex(zval *needle, zval *haystack)
+{
+	int status;
+	return in_function_inline(needle, haystack, &status);
+}
+
+ZEND_API int in_function(zval *result, zval *needle, zval *haystack)
+{
+	int status;
+	ZVAL_BOOL(result, in_function_inline(needle, haystack, &status));
+	return status;
+}
+
 #define LOWER_CASE 1
 #define UPPER_CASE 2
 #define NUMERIC 3
