@@ -1084,6 +1084,33 @@ static ZEND_COLD void zend_ast_export_name_list_ex(smart_str *str, zend_ast_list
 	}
 }
 
+static ZEND_COLD void zend_ast_export_type_list(smart_str *str, zend_ast_list *list, int indent)
+{
+    uint32_t i = 0;
+
+    while (i < list->children) {
+        zend_ast *type_ast = list->child[i];
+        zend_ast *combine_ast =
+                (list->children > 1) && (i + 1 < list->children) ?
+                list->child[++i] : NULL;
+        zend_string *name =
+                type_ast->kind != ZEND_AST_TYPE ?
+                zend_ast_get_str(type_ast) : NULL;
+
+        if (!name) {
+            smart_str_appends(str, zend_get_type_by_const_boolean(type_ast->attr));
+        } else {
+            smart_str_append(str, name);
+        }
+
+        if (combine_ast) {
+            smart_str_appends(str,
+                              combine_ast->kind == ZEND_AST_UNION ? " or " : " and ");
+        }
+        i++;
+    }
+}
+
 #define zend_ast_export_name_list(s, l, i) zend_ast_export_name_list_ex(s, l, i, ", ")
 #define zend_ast_export_catch_name_list(s, l, i) zend_ast_export_name_list_ex(s, l, i, "|")
 
@@ -1449,6 +1476,9 @@ simple_list:
 			goto simple_list;
 		case ZEND_AST_NAME_LIST:
 			zend_ast_export_name_list(str, (zend_ast_list*)ast, indent);
+			break;
+		case ZEND_AST_TYPE_LIST:
+			zend_ast_export_type_list(str, (zend_ast_list*)ast, indent);
 			break;
 		case ZEND_AST_USE:
 			smart_str_appends(str, "use ");

@@ -508,6 +508,20 @@ static void zend_file_cache_serialize_op_array(zend_op_array            *op_arra
 						(allow_null ? (Z_UL(1) << (sizeof(zend_type)*8-2)) : Z_UL(0)) | /* type allow null */
 						(zend_type)type_name;
 				}
+				if (p->multi.names) {
+					zend_string **names, **end;
+					SERIALIZE_PTR(p->multi.names);
+					names = p->multi.names;
+					UNSERIALIZE_PTR(names);
+
+					end = names + p->multi.last;
+					while (names < end) {
+						if (!IS_SERIALIZED(*names)) {
+							SERIALIZE_STR(*names);
+						}
+						names++;
+					}
+				}
 				p++;
 			}
 		}
@@ -1167,6 +1181,20 @@ static void zend_file_cache_unserialize_op_array(zend_op_array           *op_arr
 
 					UNSERIALIZE_STR(type_name);
 					p->type = ZEND_TYPE_ENCODE_CLASS(type_name, allow_null);
+				}
+				if (p->multi.names) {
+					zend_string **names, **end;
+					UNSERIALIZE_PTR(p->multi.names);
+					names = p->multi.names;
+
+					end = names + p->multi.last;
+					while (names < end) {
+						if (!IS_UNSERIALIZED(*names)) {
+							UNSERIALIZE_STR(*names);
+						}
+						names++;
+					}
+					
 				}
 				p++;
 			}

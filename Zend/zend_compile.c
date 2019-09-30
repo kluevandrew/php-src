@@ -31,6 +31,7 @@
 #include "zend_language_scanner.h"
 #include "zend_inheritance.h"
 #include "zend_vm.h"
+#include "zend_type_info.h"
 
 #define SET_NODE(target, src) do { \
 		target ## _type = (src)->op_type; \
@@ -217,6 +218,9 @@ static const builtin_type_info builtin_types[] = {
 	{ZEND_STRL("float"), IS_DOUBLE},
 	{ZEND_STRL("string"), IS_STRING},
 	{ZEND_STRL("bool"), _IS_BOOL},
+	{ZEND_STRL("true"), IS_TRUE},
+	{ZEND_STRL("false"), IS_FALSE},
+	{ZEND_STRL("null"), IS_NULL},
 	{ZEND_STRL("void"), IS_VOID},
 	{ZEND_STRL("iterable"), IS_ITERABLE},
 	{ZEND_STRL("object"), IS_OBJECT},
@@ -1237,6 +1241,11 @@ static void zend_mark_function_as_generator() /* {{{ */
 
 	if (CG(active_op_array)->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
 		zend_arg_info return_info = CG(active_op_array)->arg_info[-1];
+
+		if (return_info.multi.types) {
+            const char *msg = "Generators may only declare a return type of Generator, Iterator or Traversable, %s%s %s not permitted";
+            zend_error_noreturn(E_COMPILE_ERROR, msg, ZEND_MULTI_NAME(return_info.multi.type), "s", "are");
+		}
 
 		if (ZEND_TYPE_CODE(return_info.type) != IS_ITERABLE) {
 			const char *msg = "Generators may only declare a return type of Generator, Iterator, Traversable, or iterable, %s is not permitted";
@@ -2429,7 +2438,8 @@ static void zend_emit_return_type_check(
 			}
 		}
 
-		if (expr && expr->op_type == IS_CONST) {
+		/* TODO(someone) check multi here against constant literals etc ? */
+		if (expr && expr->op_type == IS_CONST && !return_info->multi.types) {
 			if ((ZEND_TYPE_CODE(return_info->type) == Z_TYPE(expr->u.constant))
 			 ||((ZEND_TYPE_CODE(return_info->type) == _IS_BOOL)
 			  && (Z_TYPE(expr->u.constant) == IS_FALSE
@@ -2446,11 +2456,16 @@ static void zend_emit_return_type_check(
 			opline->result_type = expr->op_type = IS_TMP_VAR;
 			opline->result.var = expr->u.op.var = get_temporary_variable(CG(active_op_array));
 		}
-		if (ZEND_TYPE_IS_CLASS(return_info->type)) {
+		if (return_info->multi.types & MAY_BE_OBJECT) {
 			opline->op2.num = CG(active_op_array)->cache_size;
-			CG(active_op_array)->cache_size += sizeof(void*);
+			CG(active_op_array)->cache_size += sizeof(void*) * return_info->multi.last;
 		} else {
-			opline->op2.num = -1;
+			if (ZEND_TYPE_IS_CLASS(return_info->type)) {
+				opline->op2.num = CG(active_op_array)->cache_size;
+				CG(active_op_array)->cache_size += sizeof(void*);
+			} else {
+				opline->op2.num = -1;
+			}
 		}
 	}
 }
@@ -5565,6 +5580,135 @@ static void zend_compile_typename(zend_ast *ast, zend_arg_info *arg_info, zend_b
 {
 	if (ast->kind == ZEND_AST_TYPE) {
 		arg_info->type = ZEND_TYPE_ENCODE(ast->attr, allow_null);
+	} else if (ast->kind == ZEND_AST_TYPE_LIST) {
+		zend_ast_list *types = zend_ast_get_list(ast);
+		uint32_t end = types->children;
+		uint32_t it = 0;
+		HashTable classes;
+
+		if (end == 1) {
+			zend_compile_typename(types->child[0], arg_info, 0);
+			return;
+		}
+
+		zend_hash_init(&classes, 8, NULL, NULL, 0);
+
+		for (it = 0; it < end; it++) {
+			zend_ast *type_ast = types->child[it];
+			zend_ast *combine = ++it < end ? types->child[it] : NULL;
+			zend_string *name = type_ast->kind != ZEND_AST_TYPE ?
+				zend_ast_get_str(type_ast) : NULL;
+			zend_uchar type = name ?
+				zend_lookup_builtin_type_by_name(name) : type_ast->attr;
+
+			if (name && type != 0 && type_ast->attr != ZEND_NAME_NOT_FQ) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Scalar type declaration '%s' must be unqualified",
+					ZSTR_VAL(zend_string_tolower(name)));
+			}
+
+			if (arg_info->multi.type && combine && (combine->kind == ZEND_AST_UNION) != (arg_info->multi.type == ZEND_MULTI_UNION)) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot use %s when creating %s type",
+					combine->kind == ZEND_AST_UNION ? "union" : "intersection",
+					ZEND_MULTI_NAME(arg_info->multi.type));
+			} else if (combine) {
+				switch (combine->kind) {
+					case ZEND_AST_UNION:
+						arg_info->multi.type = ZEND_MULTI_UNION;
+					break;
+
+					case ZEND_AST_INTERSECTION:
+						arg_info->multi.type = ZEND_MULTI_INTERSECTION;
+					break;
+
+					default:
+						ZEND_ASSERT(0);
+				}
+			}
+
+			if (type != 0) {
+				switch (type) {
+					/* nullable types needs to deal with null/void; If we want to disallow null in this patch, add this again... */
+					case IS_NULL:
+						zend_error_noreturn(E_COMPILE_ERROR,
+							"Scalar type %s is not allowed in %s",
+							zend_get_type_by_const(type),
+							ZEND_MULTI_NAME(arg_info->multi.type));
+					break;
+
+					case IS_VOID:
+						zend_error_noreturn(E_COMPILE_ERROR,
+							"Void is not a valid parameter type");
+					break;
+
+					case IS_FALSE:
+					case IS_TRUE:
+					case _IS_BOOL:
+						if (arg_info->multi.types & ((MAY_BE_FALSE|MAY_BE_TRUE|MAY_BE_BOOL) & ~(1<<type))) {
+							zend_error_noreturn(E_COMPILE_ERROR,
+								"Only one of false, true or bool allowed in a type union");
+						}
+						/* fallthrough */
+					default:
+						if (arg_info->multi.types & (1<<type)) {
+							zend_error_noreturn(E_COMPILE_ERROR,
+								"%s is already present in %s",
+								zend_get_type_by_const_boolean(type),
+								ZEND_MULTI_NAME(arg_info->multi.type));
+						}
+
+						arg_info->multi.types |= (1<<type);
+				}
+			} else {
+				uint32_t fetch_type = zend_get_class_fetch_type_ast(type_ast);
+
+				if (fetch_type == ZEND_FETCH_CLASS_DEFAULT) {
+					name = zend_resolve_class_name_ast(type_ast);
+					zend_assert_valid_class_name(name);
+				} else {
+					zend_ensure_valid_class_fetch_type(fetch_type);
+					zend_string_addref(name);
+				}
+
+				if (zend_hash_exists(&classes, name)) {
+					zend_error_noreturn(E_COMPILE_ERROR,
+							"%s is already present in %s",
+							ZSTR_VAL(name),
+							ZEND_MULTI_NAME(arg_info->multi.type));
+				}
+
+				if (arg_info->multi.names) {
+					arg_info->multi.names = erealloc(arg_info->multi.names, sizeof(zend_string*) * ++arg_info->multi.last);
+				} else {
+					arg_info->multi.names = emalloc(sizeof(zend_string*) * ++arg_info->multi.last);
+				}
+
+				arg_info->multi.types |= MAY_BE_OBJECT;
+				arg_info->multi.names[arg_info->multi.last-1] = name;
+
+				zend_hash_add_empty_element(&classes, name);
+			}
+		}
+
+		if (arg_info->multi.type == ZEND_MULTI_INTERSECTION) {
+			zend_long non_callable = arg_info->multi.types & ~MAY_BE_CALLABLE;
+			if ((non_callable & (non_callable - 1)) != 0) {
+				arg_info->multi.types = non_callable;
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot require parameters to be %s at the same time in intersection types",
+					ZSTR_VAL(zend_get_multi_type_declaration(&arg_info->multi, 1)));
+			}
+			if (arg_info->multi.types & ~(MAY_BE_STRING|MAY_BE_ARRAY|MAY_BE_CALLABLE|MAY_BE_OBJECT)) {
+				arg_info->multi.types &= ~(MAY_BE_STRING|MAY_BE_ARRAY|MAY_BE_CALLABLE|MAY_BE_OBJECT);
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Scalar types %s are disallowed in intersection types",
+					ZSTR_VAL(zend_get_multi_type_declaration(&arg_info->multi, 1)));
+			}
+		}
+
+		zend_hash_destroy(&classes);
+		arg_info->type = 0;
 	} else {
 		zend_string *class_name = zend_ast_get_str(ast);
 		zend_uchar type = zend_lookup_builtin_type_by_name(class_name);
@@ -5574,6 +5718,11 @@ static void zend_compile_typename(zend_ast *ast, zend_arg_info *arg_info, zend_b
 				zend_error_noreturn(E_COMPILE_ERROR,
 					"Type declaration '%s' must be unqualified",
 					ZSTR_VAL(zend_string_tolower(class_name)));
+			}
+			if (type == IS_TRUE || type == IS_FALSE || type == IS_NULL) {
+				zend_error_noreturn(E_COMPILE_ERROR,
+					"Cannot use %s as standalone scalar type",
+					ZSTR_VAL(class_name));
 			}
 			arg_info->type = ZEND_TYPE_ENCODE(type, allow_null);
 		} else {
@@ -5608,6 +5757,7 @@ void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast) /* {{{ */
 		arg_infos->pass_by_reference = (op_array->fn_flags & ZEND_ACC_RETURN_REFERENCE) != 0;
 		arg_infos->is_variadic = 0;
 		arg_infos->type = 0;
+        memset(&arg_infos->multi, 0, sizeof(zend_multi_type));
 
 		if (return_type_ast->attr & ZEND_TYPE_NULLABLE) {
 			allow_null = 1;
@@ -5695,6 +5845,7 @@ void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast) /* {{{ */
 		arg_info->is_variadic = is_variadic;
 		/* TODO: Keep compatibility, but may be better reset "allow_null" ??? */
 		arg_info->type = ZEND_TYPE_ENCODE(0, 1);
+		memset(&arg_info->multi, 0, sizeof(zend_multi_type));
 
 		if (type_ast) {
 			zend_bool allow_null;
@@ -5715,7 +5866,26 @@ void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast) /* {{{ */
 				zend_error_noreturn(E_COMPILE_ERROR, "void cannot be used as a parameter type");
 			}
 
-			if (type_ast->kind == ZEND_AST_TYPE) {
+			if (arg_info->multi.types && default_ast && !has_null_default) {
+				zend_uchar default_type = Z_TYPE(default_node.u.constant);
+				if (Z_CONSTANT(default_node.u.constant)) {
+					/* empty, do runtime check */
+				} else if (arg_info->multi.type == ZEND_MULTI_INTERSECTION) {
+					zend_error_noreturn(E_COMPILE_ERROR, "Default value for intersection types can only be NULL");
+				} else if (!(arg_info->multi.types & (1 << default_type)) && ((default_type != IS_TRUE && default_type != IS_FALSE) || !(arg_info->multi.types & MAY_BE_BOOL))) {
+					if (default_type == IS_LONG && (arg_info->multi.types & MAY_BE_DOUBLE)) {
+						convert_to_double(&default_node.u.constant);
+					} else {
+						arg_info->multi.types = (arg_info->multi.types & ~MAY_BE_OBJECT) | MAY_BE_NULL;
+						arg_info->multi.last = 0;
+						zend_error_noreturn(E_COMPILE_ERROR,
+							"Default type %s does not match allowed types %s for parameter %d",
+							zend_get_type_by_const_boolean(default_type),
+							ZSTR_VAL(zend_get_multi_type_declaration(&arg_info->multi, 1)),
+							i + 1);
+					}
+				}
+			} else if (type_ast->kind == ZEND_AST_TYPE_LIST && zend_ast_get_list(type_ast)->child[0]->kind == ZEND_AST_TYPE) {
 				if (ZEND_TYPE_CODE(arg_info->type) == IS_ARRAY) {
 					if (default_ast && !has_null_default
 						&& Z_TYPE(default_node.u.constant) != IS_ARRAY
@@ -5768,15 +5938,25 @@ void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast) /* {{{ */
 
 			/* Allocate cache slot to speed-up run-time class resolution */
 			if (opline->opcode == ZEND_RECV_INIT) {
-				if (ZEND_TYPE_IS_CLASS(arg_info->type)) {
-					opline->extended_value = zend_alloc_cache_slot();
+				if (arg_info->multi.types & MAY_BE_OBJECT) {
+					opline->op2.num = op_array->cache_size;
+					op_array->cache_size += sizeof(void*) * arg_info->multi.last;
+				} else {
+					if (ZEND_TYPE_IS_CLASS(arg_info->type)) {
+						opline->extended_value = zend_alloc_cache_slot();
+					}
 				}
 			} else {
-				if (ZEND_TYPE_IS_CLASS(arg_info->type)) {
+				if (arg_info->multi.types & MAY_BE_OBJECT) {
 					opline->op2.num = op_array->cache_size;
-					op_array->cache_size += sizeof(void*);
+					op_array->cache_size += sizeof(void*) * arg_info->multi.last;
 				} else {
-					opline->op2.num = -1;
+					if (ZEND_TYPE_IS_CLASS(arg_info->type)) {
+						opline->op2.num = op_array->cache_size;
+						op_array->cache_size += sizeof(void*);
+					} else {
+						opline->op2.num = -1;
+					}
 				}
 			}
 		} else {

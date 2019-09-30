@@ -27,6 +27,7 @@
 #include "zend_API.h"
 #include "zend_constants.h"
 #include "zend_execute.h"
+#include "zend_type_info.h"
 #include "zend_vm.h"
 
 #define DEBUG_COMPACT_LITERALS 0
@@ -128,7 +129,8 @@ void zend_optimizer_compact_literals(zend_op_array *op_array, zend_optimizer_ctx
 	HashTable hash;
 	zend_string *key = NULL;
 	void *checkpoint = zend_arena_checkpoint(ctx->arena);
-	int *const_slot, *class_slot, *func_slot, *bind_var_slot, *property_slot, *method_slot;
+    zend_arg_info *arg_info = op_array->arg_info;
+    int *const_slot, *class_slot, *func_slot, *bind_var_slot, *property_slot, *method_slot;
 
 	if (op_array->last_literal) {
 		info = (literal_info*)zend_arena_calloc(&ctx->arena, op_array->last_literal, sizeof(literal_info));
@@ -258,6 +260,15 @@ void zend_optimizer_compact_literals(zend_op_array *op_array, zend_optimizer_ctx
 					break;
 				case ZEND_RECV_INIT:
 					LITERAL_INFO(opline->op2.constant, LITERAL_VALUE, 1);
+                    if (arg_info[opline->op1.num - 1].multi.types & MAY_BE_OBJECT) {
+                        opline->op2.num = cache_size;
+                        cache_size += sizeof(void *) * arg_info[opline->op1.num - 1].multi.last;
+                    } else {
+                        if (Z_CACHE_SLOT(op_array->literals[opline->op2.constant]) != -1) {
+                            Z_CACHE_SLOT(op_array->literals[opline->op2.constant]) = cache_size;
+                            cache_size += sizeof(void *);
+                        }
+                    }
 					break;
 				case ZEND_DECLARE_FUNCTION:
 				case ZEND_DECLARE_CLASS:
@@ -272,6 +283,28 @@ void zend_optimizer_compact_literals(zend_op_array *op_array, zend_optimizer_ctx
 					LITERAL_INFO(opline->op1.constant, LITERAL_VALUE, 1);
 					LITERAL_INFO(opline->op2.constant, LITERAL_VALUE, 2);
 					break;
+                case ZEND_RECV:
+                case ZEND_RECV_VARIADIC:
+                    if (opline->op2.num != -1) {
+                        if (arg_info[opline->op1.num - 1].multi.types & MAY_BE_OBJECT) {
+                            opline->op2.num = cache_size;
+                            cache_size += sizeof(void *) * arg_info[opline->op1.num - 1].multi.last;
+                        } else {
+                            opline->op2.num = cache_size;
+                            cache_size += sizeof(void *);
+                        }
+                    }
+                    break;
+                case ZEND_VERIFY_RETURN_TYPE:
+                    if (opline->op2.num != -1) {
+                        if (arg_info[-1].multi.types & MAY_BE_OBJECT) {
+                            opline->op2.num = cache_size;
+                            cache_size += sizeof(void *) * arg_info[-1].multi.last;
+                        } else {
+                            opline->op2.num = cache_size;
+                            cache_size += sizeof(void *);
+                        }
+                    }
 				case ZEND_ISSET_ISEMPTY_DIM_OBJ:
 				case ZEND_ASSIGN_DIM:
 				case ZEND_UNSET_DIM:

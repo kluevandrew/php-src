@@ -41,6 +41,8 @@
 #include "zend_extensions.h"
 #include "zend_builtin_functions.h"
 #include "zend_smart_str.h"
+#include "zend_type_info.h"
+#include "zend_inheritance.h"
 
 #define reflection_update_property(object, name, value) do { \
 		zval member; \
@@ -2611,7 +2613,7 @@ ZEND_METHOD(reflection_parameter, hasType)
 	}
 	GET_REFLECTION_OBJECT_PTR(param);
 
-	RETVAL_BOOL(ZEND_TYPE_IS_SET(param->arg_info->type));
+	RETVAL_BOOL(ZEND_TYPE_IS_SET(param->arg_info->type) || param->arg_info->multi.types);
 }
 /* }}} */
 
@@ -2627,7 +2629,7 @@ ZEND_METHOD(reflection_parameter, getType)
 	}
 	GET_REFLECTION_OBJECT_PTR(param);
 
-	if (!ZEND_TYPE_IS_SET(param->arg_info->type)) {
+	if (!ZEND_TYPE_IS_SET(param->arg_info->type) && !param->arg_info->multi.types) {
 		RETURN_NULL();
 	}
 	reflection_type_factory(_copy_function(param->fptr), Z_ISUNDEF(intern->obj)? NULL : &intern->obj, param->arg_info, return_value);
@@ -2646,7 +2648,7 @@ ZEND_METHOD(reflection_parameter, isArray)
 	}
 	GET_REFLECTION_OBJECT_PTR(param);
 
-	RETVAL_BOOL(ZEND_TYPE_CODE(param->arg_info->type) == IS_ARRAY);
+	RETVAL_BOOL(ZEND_TYPE_CODE(param->arg_info->type) == IS_ARRAY || param->arg_info->multi.types & MAY_BE_ARRAY);
 }
 /* }}} */
 
@@ -2662,7 +2664,7 @@ ZEND_METHOD(reflection_parameter, isCallable)
 	}
 	GET_REFLECTION_OBJECT_PTR(param);
 
-	RETVAL_BOOL(ZEND_TYPE_CODE(param->arg_info->type) == IS_CALLABLE);
+	RETVAL_BOOL(ZEND_TYPE_CODE(param->arg_info->type) == IS_CALLABLE || param->arg_info->multi.types & MAY_BE_CALLABLE);
 }
 /* }}} */
 
@@ -2904,7 +2906,7 @@ ZEND_METHOD(reflection_type, isBuiltin)
 	}
 	GET_REFLECTION_OBJECT_PTR(param);
 
-	RETVAL_BOOL(ZEND_TYPE_IS_CODE(param->arg_info->type));
+	RETVAL_BOOL(ZEND_TYPE_IS_CODE(param->arg_info->type) && !(param->arg_info->multi.types & MAY_BE_OBJECT));
 }
 /* }}} */
 
@@ -2916,6 +2918,38 @@ static zend_string *reflection_type_name(type_reference *param) {
 		char *name = zend_get_type_by_const(ZEND_TYPE_CODE(param->arg_info->type));
 		return zend_string_init(name, strlen(name), 0);
 	}
+}
+/* }}} */
+
+/* {{{ proto public bool ReflectionType::isUnion()
+  Returns whether parameter is a union type */
+ZEND_METHOD(reflection_type, isUnion)
+{
+	reflection_object *intern;
+	type_reference *param;
+
+	if (zend_parse_parameters_none() == FAILURE) {
+		return;
+	}
+	GET_REFLECTION_OBJECT_PTR(param);
+
+	RETVAL_BOOL(param->arg_info->multi.type == ZEND_MULTI_UNION);
+}
+/* }}} */
+
+/* {{{ proto public bool ReflectionType::isIntersection()
+  Returns whether parameter is an intersection type */
+ZEND_METHOD(reflection_type, isIntersection)
+{
+	reflection_object *intern;
+	type_reference *param;
+
+	if (zend_parse_parameters_none() == FAILURE) {
+		return;
+	}
+	GET_REFLECTION_OBJECT_PTR(param);
+
+	RETVAL_BOOL(param->arg_info->multi.type == ZEND_MULTI_INTERSECTION);
 }
 /* }}} */
 
@@ -2931,7 +2965,11 @@ ZEND_METHOD(reflection_type, __toString)
 	}
 	GET_REFLECTION_OBJECT_PTR(param);
 
-	RETURN_STR(reflection_type_name(param));
+    if(param->arg_info->multi.type) {
+        RETURN_STR(zend_get_multi_type_declaration(&param->arg_info->multi, 1));
+    } else {
+        RETURN_STR(reflection_type_name(param));
+    }
 }
 /* }}} */
 
@@ -4445,7 +4483,7 @@ ZEND_METHOD(reflection_class, getProperties)
 	if (zend_parse_parameters(ZEND_NUM_ARGS(), "|l!", &filter, &filter_is_null) == FAILURE) {
 		return;
 	}
-	
+
 	if (filter_is_null) {
 		filter = ZEND_ACC_PPP_MASK | ZEND_ACC_STATIC;
 	}
@@ -6618,6 +6656,8 @@ static const zend_function_entry reflection_type_functions[] = {
 	ZEND_ME(reflection, __clone, arginfo_reflection__void, ZEND_ACC_PRIVATE|ZEND_ACC_FINAL)
 	ZEND_ME(reflection_type, allowsNull, arginfo_reflection__void, 0)
 	ZEND_ME(reflection_type, isBuiltin, arginfo_reflection__void, 0)
+    ZEND_ME(reflection_type, isUnion, arginfo_reflection__void, 0)
+    ZEND_ME(reflection_type, isIntersection, arginfo_reflection__void, 0)
 	/* ReflectionType::__toString() is deprecated, but we currently do not mark it as such
 	 * due to bad interaction with the PHPUnit error handler and exceptions in __toString().
 	 * See PR2137. */
